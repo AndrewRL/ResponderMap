@@ -1,0 +1,471 @@
+# -*- coding: UTF-8 -*-
+import logging
+import math
+import os
+import qgis
+import qgis.core
+import qgis.utils
+from pyspatialopt import version
+
+
+def generate_query(unique_ids, unique_field_name, wrap_values_in_quotes=False):
+    """
+    Generates a select or definition query that can applied to the input layers
+    :param unique_ids: (list) A list of ids to query
+    :param unique_field_name: (string) The name of field that the ids correspond to
+    :param wrap_values_in_quotes: (bool) Should the ids be wrapped in quotes (if unique_field_name is string)
+    :return: (string) A query string that can be applied to a layer
+    """
+    if unique_ids:
+        if wrap_values_in_quotes:
+            query = "{} in (-1,{})".format(unique_field_name, ",".join("'{0}'".format(w) for w in unique_ids))
+        else:
+            query = "{} in (-1,{})".format(unique_field_name, ",".join(unique_ids))
+    else:
+        query = "{} in (-1)".format(unique_field_name)
+    return query
+
+
+def reset_layers(*args):
+    """
+    Clears the selection and definition query applied to the layers
+    :param args: (Feature Layers) The feature layers to reset
+    :return:
+    """
+    for layer in args:
+        layer.setSubsetString("")
+        layer.removeSelection()
+
+
+def generate_serviceable_demand(dl, dl_demand_field, dl_id_field, *args):
+    """
+    Finds to total serviceable coverage when 2 facility layers are used
+    Merges polygons & dissolves them to form one big area of total coverage
+    Then intersects with demand layer
+    :param dl: (Feature Layer) The demand polygon or point layer
+    :param dl_demand_field: (string) The field representing demand
+    :param dl_id_field: (string) The name of the unique field for the demand layer
+    :param args: (Feature Layer) The facility layers to use
+    :return: (dictionary) A dictionary of similar format to the coverage format
+    """
+    # Reset DF
+    # Check parameters so we get useful exceptions and messages
+    reset_layers(dl)
+    reset_layers(*args)
+    # Check parameters so we get useful exceptions and messages
+    if dl.wkbType() not in [qgis.utils.QGis.WKBPoint, qgis.utils.QGis.WKBPolygon]:
+        raise TypeError("Demand layer must have polygon or point geometry")
+    dl_field_names = [field.name() for field in dl.pendingFields()]
+    if dl_demand_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_demand_field))
+    if dl_id_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_id_field))
+    logging.getLogger().info("Initializing output...")
+    if dl.wkbType() == qgis.utils.QGis.WKBPolygon:
+        output = {
+            "version": version.__version__,
+            "demand": {},
+            "type": {
+                "mode": "serviceableDemand",
+                "type": "partial"}
+        }
+    else:
+        output = {
+            "version": version.__version__,
+            "demand": {},
+            "type": {
+                "mode": "serviceableDemand",
+                "type": "binary"}
+        }
+
+    # Merge all of facility layers together
+    logging.getLogger().info("Combining facilities...")
+    dissolved_geom = None
+    for layer in args:
+        for feature in layer.getFeatures():
+            if dissolved_geom is None:
+                dissolved_geom = feature.geometry()
+            dissolved_geom = dissolved_geom.combine(feature.geometry())
+    logging.getLogger().info("Determining possible service coverage for each demand unit...")
+    for feature in dl.getFeatures():
+        if dl.wkbType() == qgis.utils.QGis.WKBPolygon:
+            if dissolved_geom.intersects(feature.geometry()):
+                intersected = dissolved_geom.intersection(feature.geometry())
+                if intersected.area() > 0:
+                    serviceable_demand = math.ceil(float(intersected.area() / feature.geometry().area()) * feature[
+                        dl_demand_field])
+                else:
+                    serviceable_demand = 0.0
+            else:
+                serviceable_demand = feature[dl_demand_field]
+        else:
+            if dissolved_geom.contains(feature.geometry()):
+                serviceable_demand = feature[dl_demand_field]
+            else:
+                serviceable_demand = 0.0
+        # Make sure serviceable is less than or equal to demand, floating point issues
+        output["demand"][str(feature[dl_id_field])] = {"serviceableDemand": 0}
+        if serviceable_demand < feature[dl_demand_field]:
+            output["demand"][str(feature[dl_id_field])]["serviceableDemand"] = serviceable_demand
+        else:
+            output["demand"][str(feature[dl_id_field])]["serviceableDemand"] = feature[dl_demand_field]
+    logging.getLogger().info("Serviceable demand successfully created.")
+    reset_layers(dl)
+    reset_layers(*args)
+    return output
+
+
+def generate_binary_coverage(dl, fl, dl_demand_field, dl_id_field, fl_id_field, fl_variable_name=None):
+    """
+    Generates a dictionary representing the binary coverage of a facility to demand points
+    :param dl: (Feature Layer) The demand polygon or point layer
+    :param fl: (Feature Layer) The facility service area polygon layer
+    :param dl_demand_field: (string) The name of the field in the demand layer that describes the demand
+    :param dl_id_field: (string) The name of the unique identifying field on the demand layer
+    :param fl_id_field: (string) The name of the unique identifying field on the facility layer
+    :param fl_variable_name: (string) The name to use to represent the facility variable
+    :return: (dictionary) A nested dictionary storing the coverage relationships
+    """
+    '''
+    # Check parameters so we get useful exceptions and messages
+    if dl.wkbType() not in [qgis.utils.QGis.WKBPoint, qgis.utils.QGis.WKBPolygon]:
+        raise TypeError("Demand layer must have polygon or point geometry")
+    if fl.wkbType() != qgis.utils.QGis.WKBPolygon:
+        raise TypeError("Facility service area layer must have polygon geometry")
+    '''
+    dl_prov = dl.dataProvider()
+    dl_fields = dl_prov.fields()
+    dl_field_names = [field.name() for field in dl_fields]
+    if dl_demand_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_demand_field))
+    if dl_id_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_id_field))
+    fl_prov = fl.dataProvider()
+    fl_fields = fl_prov.fields()
+    fl_field_names = [field.name() for field in fl_fields]
+    if fl_id_field not in fl_field_names:
+        raise ValueError("'{}' field not found in facility service area layer".format(fl_id_field))
+    reset_layers(dl, fl)
+    if fl_variable_name is None:
+        fl_variable_name = os.path.basename(os.path.abspath(fl.dataProvider().dataSourceUri())).split(".")[0]
+    logging.getLogger().info("Initializing facilities in output...")
+    output = {
+        "version": version.__version__,
+        "type": {
+            "mode": "coverage",
+            "type": "binary",
+        },
+        "demand": {},
+        "totalDemand": 0.0,
+        "totalServiceableDemand": 0.0,
+        "facilities": {fl_variable_name: []}
+    }
+    # List all of the facilities
+    logging.getLogger().info("Initializing facilities in output...")
+    for feature in fl.getFeatures():
+        output["facilities"][fl_variable_name].append(str(feature[fl_id_field]))
+    # Build empty data structure
+    logging.getLogger().info("Initializing demand in output...")
+    for feature in dl.getFeatures():
+        output["demand"][str(feature[dl_id_field])] = {
+            "area": round(feature.geometry().area()),
+            "demand": round(feature[dl_demand_field]),
+            "serviceableDemand": 0.0,
+            "coverage": {fl_variable_name: {}}
+        }
+    logging.getLogger().info("Determining binary coverage for each demand unit...")
+    print(dl.wkbType())
+    for feature in fl.getFeatures():
+        print(dl.wkbType())
+        if dl.wkbType() == 6:
+            print("In the if.")
+            geom = feature.geometry()
+            for dl_p in dl.getFeatures():
+                geom2 = dl_p.geometry()
+                if geom.contains(geom2):
+                    output["demand"][str(dl_p[dl_id_field])]["serviceableDemand"] = \
+                        output["demand"][str(dl_p[dl_id_field])]["demand"]
+                    output["demand"][str(dl_p[dl_id_field])]["coverage"][fl_variable_name][
+                        str(feature[fl_id_field])] = 1
+        else:
+            print("In the else.")
+            geom = feature.geometry()
+            for dl_p in dl.getFeatures():
+                geom2 = dl_p.geometry()
+                if geom.contains(geom2):
+                    output["demand"][str(dl_p[dl_id_field])]["serviceableDemand"] = \
+                        output["demand"][str(dl_p[dl_id_field])]["demand"]
+                    output["demand"][str(dl_p[dl_id_field])]["coverage"][fl_variable_name][
+                        str(feature[fl_id_field])] = 1
+    for feature in dl.getFeatures():
+        output["totalServiceableDemand"] += output["demand"][str(feature[dl_id_field])]["serviceableDemand"]
+        output["totalDemand"] += feature[dl_demand_field]
+    logging.getLogger().info("Binary coverage successfully generated.")
+    reset_layers(dl, fl)
+    return output
+
+
+def generate_partial_coverage(dl, fl, dl_demand_field, dl_id_field, fl_id_field, fl_variable_name=None):
+    """
+    Generates a dictionary representing the partial coverage (based on area) of a facility to demand areas
+    :param dl: (Feature Layer) The demand polygon layer
+    :param fl: (Feature Layer) The facility service area polygon layer
+    :param dl_demand_field: (string) The name of the field in the demand layer that describes the demand
+    :param dl_id_field: (string) The name of the unique identifying field on the demand layer
+    :param fl_id_field: (string) The name of the unique identifying field on the facility layer
+    :param fl_variable_name: (string) The name to use to represent the facility variable
+    :return: (dictionary) A nested dictionary storing the coverage relationships
+    """
+    # Reset DF
+    # Check parameters so we get useful exceptions and messages
+    '''
+    if dl.wkbType() != qgis.utils.QGis.WKBPolygon:
+        raise TypeError("Demand layer must have polygon geometry")
+    if fl.wkbType() != qgis.utils.QGis.WKBPolygon:
+        raise TypeError("Facility service area layer must have polygon geometry")
+    '''
+    dl_prov = dl.dataProvider()
+    dl_fields = dl_prov.fields()
+    dl_field_names = [field.name() for field in dl_fields]
+    if dl_demand_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_demand_field))
+    if dl_id_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_id_field))
+    fl_prov = fl.dataProvider()
+    fl_fields = fl_prov.fields()
+    fl_field_names = [field.name() for field in fl_fields]
+    if fl_id_field not in fl_field_names:
+        raise ValueError("'{}' field not found in facility service area layer".format(fl_id_field))
+    reset_layers(dl, fl)
+    # If no facility layer name provided, use the name of the feature class/shapefile
+    if fl_variable_name is None:
+        fl_variable_name = os.path.basename(os.path.abspath(fl.dataProvider().dataSourceUri())).split(".")[0]
+    # Create the initial data structure
+    logging.getLogger().info("Initializing facilities in output...")
+    output = {
+        "version": version.__version__,
+        "type": {
+            "mode": "coverage",
+            "type": "partial",
+        },
+        "demand": {},
+        "totalDemand": 0.0,
+        "totalServiceableDemand": 0.0,
+        "facilities": {fl_variable_name: []}
+    }
+    # List all of the facilities
+    for feature in fl.getFeatures():
+        output["facilities"][fl_variable_name].append(str(feature[fl_id_field]))
+    # Build empty data structure
+    logging.getLogger().info("Initializing demand in output...")
+    for feature in dl.getFeatures():
+        output["demand"][str(feature[dl_id_field])] = {
+            "area": round(feature.geometry().area()),
+            "demand": round(feature[dl_demand_field]),
+            "serviceableDemand": 0.0,
+            "coverage": {fl_variable_name: {}}
+        }
+    '''
+    # Dissolve all facility service areas so we can find the total serviceable area
+    logging.getLogger().info("Combining facilities...")
+    dissolved_geom = None
+    for feature in fl.getFeatures():
+        if dissolved_geom is None:
+            dissolved_geom = feature.geometry()
+        dissolved_geom = dissolved_geom.combine(feature.geometry())
+    '''
+    # Iterate over each intersected polygon and areal interpolate the demand that is covered
+    logging.getLogger().info("Determining partial coverage for each demand unit...")
+    for feature in dl.getFeatures():
+        dissolved_geom = None
+        for service_area in fl.getFeatures():
+            if service_area.geometry().intersects(feature.geometry()):
+                if dissolved_geom is None:
+                    dissolved_geom = feature.geometry()
+                dissolved_geom = dissolved_geom.combine(feature.geometry())
+                intersected = dissolved_geom.intersection(feature.geometry())
+        if intersected.area() > 0:
+            serviceable_demand = (float(intersected.area() / feature.geometry().area()) * feature[dl_demand_field])
+        else:
+            serviceable_demand = 0.0
+        # Make sure serviceable is less than or equal to demand, floating point issues
+        if serviceable_demand < output["demand"][str(feature[dl_id_field])]["demand"]:
+            output["demand"][str(feature[dl_id_field])]["serviceableDemand"] = serviceable_demand
+        else:
+            output["demand"][str(feature[dl_id_field])]["serviceableDemand"] = \
+            output["demand"][str(feature[dl_id_field])]["demand"]
+
+        for feature2 in fl.getFeatures():
+            intersected_fd = feature.geometry().intersection(feature2.geometry())
+            if intersected_fd.area() > 0:
+                demand = (float(intersected_fd.area() / feature.geometry().area()) * feature[dl_demand_field])
+                if demand < output["demand"][str(feature[dl_id_field])]["serviceableDemand"]:
+                    output["demand"][str(feature[dl_id_field])]["coverage"][fl_variable_name] \
+                        [str(feature2[fl_id_field])] = demand
+                else:
+                    output["demand"][str(feature[dl_id_field])]["coverage"][fl_variable_name][
+                        str(feature2[fl_id_field])] = output["demand"][str(feature[dl_id_field])]["serviceableDemand"]
+    for feature in dl.getFeatures():
+        output["totalServiceableDemand"] += output["demand"][str(feature[dl_id_field])]["serviceableDemand"]
+        output["totalDemand"] += feature[dl_demand_field]
+    logging.getLogger().info("Partial coverage successfully generated.")
+    reset_layers(dl, fl)
+    return output
+
+
+def generate_traumah_coverage(dl, dl_service_area, tc_layer, ad_layer, dl_demand_field, air_distance_threshold, dl_id_field="FID", tc_layer_id_field="FID", ad_layer_id_field="FID"):
+    """
+    Generates a coverage model for the TRAUMAH model. The traumah model uses trauma centers (TC), air depots (AD), and demand
+    :param dl: (Feature Layer) The demand point layer
+    :param dl_service_area (Feature Layer) The demand service area (generally derived from street network)
+    :param tc_layer: (Feature Layer) The Trauma Center point layer
+    :param ad_layer: (Feature Layer) The Air Depot point layer
+    :param dl_demand_field: (string) The attribute that represents the demand in the demand layer
+    :param air_distance_threshold: (float) The maximum total distance a helicopter can fly
+    :param dl_id_field: (string) The attribute that represents unique ids for the demand layers
+    :param tc_layer_id_field: (string) The attribute that represents unique ids for the trauma center layers
+    :param ad_layer_id_field: (string) The attribute that represents unique ids for the air depot layers
+    :return: (dictionary) A nested dictionary storing the coverage relationships
+    """
+    if dl.wkbType() != qgis.utils.QGis.WKBPoint:
+        raise TypeError("Demand layer must have point geometry")
+    if dl_service_area.wkbType() != qgis.utils.QGis.WKBPolygon:
+        raise TypeError("Demand layer must have polygon geometry")
+    if tc_layer.wkbType() != qgis.utils.QGis.WKBPoint:
+        raise TypeError("Trauma center layer must have point geometry")
+    dl_field_names = [field.name() for field in dl.pendingFields()]
+    if dl_demand_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_demand_field))
+    if dl_id_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_id_field))
+    tc_layer_field_names = [field.name() for field in tc_layer.pendingFields()]
+    if tc_layer_id_field not in tc_layer_field_names:
+        raise ValueError("'{}' field not found in trauma center layer".format(tc_layer_id_field))
+    ad_layer_field_names = [field.name() for field in ad_layer.pendingFields()]
+    if ad_layer_id_field not in ad_layer_field_names:
+        raise ValueError("'{}' field not found in trauma center layer".format(ad_layer_id_field))
+    reset_layers(dl, dl_service_area, ad_layer, tc_layer)
+    ad_variable_name = "AirDepot"
+    tc_variable_name = "TraumaCenter"
+    ad_tc_variable_name = "ADTCPair"
+    logging.getLogger().info("Initializing facilities in output...")
+    output = {
+        "version": version.__version__,
+        "type": {
+            "mode": "coverage",
+            "type": "traumah",
+        },
+        "demand": {},
+        "totalDemand": 0.0,
+        "totalServiceableDemand": 0.0,
+        "facilities": {ad_variable_name: [],
+                       tc_variable_name: []}
+    }
+    # List all of the facilities
+    logging.getLogger().info("Initializing facilities in output...")
+    for feature in ad_layer.getFeatures():
+        output["facilities"][ad_variable_name].append(str(feature[ad_layer_id_field]))
+    for feature in tc_layer.getFeatures():
+        output["facilities"][tc_variable_name].append(str(feature[tc_layer_id_field]))
+    # Build empty data structure
+    logging.getLogger().info("Initializing demand in output...")
+    for feature in dl.getFeatures():
+        output["demand"][str(feature[dl_id_field])] = {
+            "area": round(feature.geometry().area()),
+            "demand": round(feature[dl_demand_field]),
+            "serviceableDemand": 0.0,
+            "coverage": {tc_variable_name: [],
+                         ad_tc_variable_name: []}
+        }
+    logging.getLogger().info("Determining binary coverage (using ground transport service area) for each demand unit...")
+    for feature in tc_layer.getFeatures():
+        geom = feature.geometry()
+        for dl_p in dl_service_area.getFeatures():
+            geom2 = dl_p.geometry()
+            if geom2.intersects(geom):
+                output["demand"][str(dl_p[dl_id_field])]["coverage"][tc_variable_name].append({
+                    tc_variable_name: str(feature[tc_layer_id_field])
+                })
+
+    logging.getLogger().info("Determining binary coverage (using air transportation) for each demand unit...")
+    for d in dl.getFeatures():
+        geom = d.geometry()
+        distances = {}
+        for t in tc_layer.getFeatures():
+            geom2 = t.geometry()
+            distances[t[tc_layer_id_field]] = geom.distance(geom2)
+
+        for a in ad_layer.getFeatures():
+            geom2 = a.geometry()
+            distance = geom2.distance(geom)
+            for k, v in distances.items():
+                if distance + v <= air_distance_threshold:
+                    output["demand"][str(d[dl_id_field])]["coverage"][ad_tc_variable_name].append({
+                        tc_variable_name: str(k),
+                        ad_variable_name: str(a[ad_layer_id_field])
+                    })
+    logging.getLogger().info("Binary traumah coverage successfully generated.")
+    reset_layers(dl, tc_layer, ad_layer)
+    return output
+
+
+
+def get_covered_demand(dl, dl_demand_field, mode, *args):
+    """
+    Finds to total serviceable coverage when 2 facility layers are used
+    Merges polygons & dissolves them to form one big area of total coverage
+    Then intersects with demand layer
+    :param dl: (Feature Layer) The demand polygon or point layer
+    :param dl_demand_field: (string) The field representing demand
+    :param mode: (string) ['binary', 'partial'] The type of coverage to use
+    :param args: (Feature Layer) The facility layers to use
+    :return: (dictionary) A dictionary of similar format to the coverage format
+    """
+    # Reset DF
+    # Check parameters so we get useful exceptions and messages
+    reset_layers(dl)
+    # Check parameters so we get useful exceptions and messages
+    if mode not in ['binary', 'partial']:
+        raise ValueError("'{}' is not a valid mode").format(mode)
+    '''
+    if dl.wkbType() not in [qgis.utils.QGis.WKBPoint, qgis.utils.QGis.WKBPolygon]:
+        raise TypeError("Demand layer must have polygon or point geometry")
+    '''
+    dl_prov = dl.dataProvider()
+    dl_field_names = [field.name() for field in dl_prov.fields()]
+    if dl_demand_field not in dl_field_names:
+        raise ValueError("'{}' field not found in demand layer".format(dl_demand_field))
+        # Merge all of facility layers together
+    logging.getLogger().info("Combining facilities...")
+    dissolved_geom = None
+    for layer in args:
+        for feature in layer.getFeatures():
+            if dissolved_geom is None:
+                dissolved_geom = feature.geometry()
+            dissolved_geom = dissolved_geom.combine(feature.geometry())
+    total_coverage = 0
+    logging.getLogger().info("Determining possible service coverage for each demand unit...")
+    for feature in dl.getFeatures():
+        if dl.wkbType() == 3 and mode == "partial":
+            if dissolved_geom.intersects(feature.geometry()):
+                intersected = dissolved_geom.intersection(feature.geometry())
+                if intersected.area() > 0:
+                    serviceable_demand = float(intersected.area() / feature.geometry().area()) * feature[
+                        dl_demand_field]
+                else:
+                    serviceable_demand = 0.0
+            else:
+                serviceable_demand = feature[dl_demand_field]
+        else:
+            if dissolved_geom.contains(feature.geometry()):
+                serviceable_demand = feature[dl_demand_field]
+            else:
+                serviceable_demand = 0.0
+        # Make sure serviceable is less than or equal to demand, floating point issues
+        if serviceable_demand < feature[dl_demand_field]:
+            total_coverage += serviceable_demand
+        else:
+            total_coverage += feature[dl_demand_field]
+    logging.getLogger().info("Covered demand is: {}".format(total_coverage))
+    reset_layers(dl)
+    return total_coverage

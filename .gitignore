@@ -1,0 +1,5 @@
+.idea/*
+.DS_Store
+Results/*
+__pycache__/*
+shp_files/*
