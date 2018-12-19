@@ -94,6 +94,8 @@ class GraphBuilder:
 
         pio.write_image(fig, self.source_batch.batch_config.config['batch_root'] + self.outfile)
 
+
+# TODO: Rework metadata handler classes to have Batch and Model metadata handlers extend MetadataHandler
 class MetadataHandler:
     # Stores model metadata and allows output of metadata files. Metadata can be produced for batches or single runs.
     def __init__(self, metadata=None):
@@ -157,7 +159,7 @@ class MetadataHandler:
     def add_locations(self, locs):
         pass
 
-
+# TODO: Rework config reader to have batch and model run readers extend ConfigReader
 class ConfigReader:
     # Read in batch config data and allow preparation of model run data
     def __init__(self):
@@ -197,57 +199,6 @@ class ConfigReader:
         pass
 
 
-def set_block_attributes(block_layer, default_demand):
-    bl_prov = block_layer.dataProvider()
-    for curr_id, ft in enumerate(block_layer.getFeatures()):
-        block_layer.changeAttributeValue(ft.id(), bl_prov.fieldNameIndex("point_id"), curr_id)
-        block_layer.changeAttributeValue(ft.id(), bl_prov.fieldNameIndex("demand"), default_demand)
-
-
-def isolate_blocks(block_outlines, local_area_boundary):
-    target_blocks = QgsVectorLayer("Polygon", "target_blocks", "memory")
-    target_blocks_prov = target_blocks.dataProvider()
-    target_blocks_prov.addAttributes([QgsField("point_id", QVariant.Int), QgsField("demand", QVariant.Int)])
-    target_blocks.startEditing()
-    recreate_blocks(target_blocks, block_outlines, 1)
-    delete_points_outside_polygon(target_blocks, local_area_boundary)
-    target_blocks.commitChanges()
-    return target_blocks
-
-
-def recreate_blocks(target_blocks, block_outlines, default_demand):
-    tb_prov = target_blocks.dataProvider()
-    for curr_id, ft in enumerate(list(block_outlines.getFeatures())):
-        new_ft = QgsFeature()
-        new_ft.setAttributes([curr_id, math.sqrt(ft.geometry().area())])
-        new_ft.setGeometry(ft.geometry())
-        tb_prov.addFeatures([new_ft])
-    return target_blocks
-
-
-def isolate_roads(roads, local_area_boundary):
-    target_roads = QgsVectorLayer("LINESTRING", "target_roads", "memory")
-    target_roads_prov = target_roads.dataProvider()
-    target_roads_prov.addAttributes([QgsField("point_id", QVariant.Int)])
-    target_roads.startEditing()
-    recreate_roads(target_roads, roads)
-    print("Were roads copied?")
-    print(len(list(roads.getFeatures())))
-    print(len(list(target_roads.getFeatures())))
-    delete_roads_outside_target_area(target_roads, local_area_boundary)
-    target_roads.commitChanges()
-    return target_roads
-
-
-def recreate_roads(target_roads, roads):
-    for curr_id, ft in enumerate(list(roads.getFeatures())):
-        new_ft = QgsFeature()
-        new_ft.setAttributes([curr_id])
-        new_ft.setGeometry(ft.geometry())
-        target_roads.addFeatures([new_ft])
-    return target_roads
-
-
 def calc_response_radius_km(response_time, responder_speed, buffer_time):
     return (response_time - buffer_time) * responder_speed * 1000 / 60 / 60
 
@@ -268,22 +219,6 @@ def init_logger():
     return logger
 
 
-# From a layer of features, returns a layer containing only the feature specified by
-# attribute_name = attribute_value
-def isolate_feature(containing_layer, attribute_name, attribute_value):
-    # Create an empty layer
-    output_layer = QgsVectorLayer("Polygon", "output_layer", "memory")
-    # Get the feature which matches county code
-    for county in containing_layer.getFeatures():
-        if county[attribute_name] == attribute_value:
-            output_layer.startEditing()
-            cl_prov = output_layer.dataProvider()
-            cl_prov.addFeatures([county])
-            output_layer.commitChanges()
-            break
-    return output_layer
-
-
 def find_polygon_bounds(polygon):
     multipolygon_vertices = polygon.geometry().asMultiPolygon()
 
@@ -297,7 +232,7 @@ def find_polygon_bounds(polygon):
 
     return [min(x_coords), max(x_coords), min(y_coords), max(y_coords)]
 
-
+# TODO: Move this functionality into new PointModel class with N-darts and place-and-prune
 def make_point_grid(source_layer, county_bounds, cell_size):
     #make new layer of same shape and crs as source layer
     grid_layer = QgsVectorLayer("Point", "coverage_grid", "memory")
@@ -332,7 +267,7 @@ def make_points(county_bounds, x_step, y_step):
         curr_y = y_max
     return grid_points
 
-
+# TODO: Move this into layers
 def create_road_points_layer(area_layer, roads_layer, rp_model='n_darts'):
     road_points_layer = QgsVectorLayer("Point", "road_points", "memory")
     rp_prov = road_points_layer.dataProvider()
@@ -346,28 +281,12 @@ def create_road_points_layer(area_layer, roads_layer, rp_model='n_darts'):
     elif rp_model == 'place_and_prune':
         _place_and_prune_road_pts_model(roads_layer)
 
-    '''
-    for curr_id, road in enumerate(roads_layer.getFeatures()):
-        geom = road.geometry()
-        mid_point = geom.interpolate(geom.length() / 2)
-        mid_point_buffer = QgsGeometry.fromPointXY(mid_point.asPoint()).buffer(150, 10)
-        near_existing_point = False
-        for existing_point in road_points_layer.getFeatures():
-            if existing_point.geometry().intersects(mid_point_buffer):
-                near_existing_point = True
-                break
-        if not near_existing_point:
-            ft = QgsFeature()
-            ft.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(mid_point.asPoint().x(), mid_point.asPoint().y())))
-            ft.setAttributes([curr_id])
-            rp_prov.addFeatures([ft])
-    '''
     road_points_layer.commitChanges()
     print("Road points layer created and commited with {} features.".format(len(list(road_points_layer.getFeatures()))))
     return road_points_layer
 
-
-def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts_prov, n_darts=150, buffer=150):
+# TODO: Create a road_points_model class and
+def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts_prov, n_darts=120, buffer=150):
     roads = list(roads_layer.getFeatures())
     print("Found {} roads for point placement.".format(len(roads)))
     for dart in range(0, n_darts):
@@ -416,6 +335,7 @@ def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts
 def _place_and_prune_road_pts_model(roads_layer):
     pass
 
+# TODO: Replace these functions with layer functions or helper functions
 def delete_points_outside_polygon(points_layer, polygon_layer):
     points = list(points_layer.getFeatures())
     n_points = len(points)
@@ -442,39 +362,6 @@ def delete_roads_outside_target_area(roads_layer, target_area_layer):
     return roads_layer
 
 
-def make_service_area_layer(points_layer, response_radius_NAD83):
-    sa_layer = QgsVectorLayer("Polygon", "sa_layer", "memory")
-    sa_layer_prov = sa_layer.dataProvider()
-    sa_layer.startEditing()
-    sa_layer_prov.addAttributes([QgsField("area_id", QVariant.Int), QgsField("from_point", QVariant.Int)])
-    circles = []
-    current_id = 0
-    for point in points_layer.getFeatures():
-        ft = QgsFeature()
-        ft.setGeometry(QgsGeometry.fromPointXY(point.geometry().asPoint()).buffer(response_radius_NAD83, 10))
-        ft.setAttributes([current_id, point["point_id"]])
-        circles.append(ft)
-        current_id += 1
-
-    sa_layer_prov.addFeatures(circles)
-    sa_layer.commitChanges()
-
-    print("Generated service area layer with {} service areas.".format(len(list(sa_layer.getFeatures()))))
-    return sa_layer
-
-
-def make_model_output_layer(ids, response_area_layer):
-    print(ids)
-    output_layer = QgsVectorLayer("Polygon", "output_layer", "memory")
-    output_layer_prov = output_layer.dataProvider()
-    output_layer.startEditing()
-    output_layer_prov.addAttributes([QgsField("area_id", QVariant.Int)])
-    for ft in response_area_layer.getFeatures():
-        print(ft['area_id'])
-        if ft['area_id'] in ids:
-            output_layer.addFeature(ft)
-            ids.remove(ft['area_id'])
-            if not ids:
-                break
-    output_layer.commitChanges()
-    return output_layer
+def _get_service_area_layer_key(run_vals):
+    return "{}_{}_{}_{}".format(run_vals['areas'], run_vals['response_time'], run_vals['responder_speed'],
+                                run_vals['responder_buffer'])

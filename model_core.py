@@ -1,13 +1,11 @@
 import model_utils
 import pulp
-import itertools
 from pulp import solvers
 import os
 from pyspatialopt.analysis import pyqgis_analysis
 from pyspatialopt.models import covering, utilities
 from model_utils import MetadataHandler
-from qgis.core import QgsVectorLayer, QgsVectorFileWriter, QgsProject
-from PyQt5.QtCore import QFileInfo
+from layers import *
 
 
 class ModelCore:
@@ -37,20 +35,8 @@ class ModelCore:
     def model(self):
         # Run a threshold model on a provided demand and response_area layer
 
-        '''
-        if self.batch_config.config['preload_coverage']:
-            if self.batch_config.config['existing_coverage']:
-                self.existing_coverage = _load_shp_file(self.batch_config.config['existing_coverage'])
-            else:
-                print("Generating sample existing_coverage layer.")
-                # Make a sparse road points layer
-                # Make a response area layer
-                # self.existing_coverage = ec_response_area_layer
-
-            # find the "anti-intersection" between each block and the ec_response_area_layer dissolved_geom
-            # self.blocks = anti_intersection_layer
-        '''
         self._create_run_dirs()
+        # TODO: shp_files should be saved from layer objects (or some kind of layer writer?)
         self._save_shp_files()
 
         # TODO: Figure out why it is necessary to reload here rather than just using the layer.
@@ -63,7 +49,8 @@ class ModelCore:
 
         binary_coverage_polygon = pyqgis_analysis.generate_partial_coverage(block_layer, response_area_layer,
                                                                             "demand", "point_id", "area_id")
-
+        # TODO: Build a handler which selects the proper model based on config
+        # TODO: Move this code into a function (class?) for partial_coverage_threshold
         # Create the mclp model
         if self.logger:
             self.logger.info("Creating MCLP model...")
@@ -79,8 +66,8 @@ class ModelCore:
             print("Model run {} deemed infeasible. Skipping...".format(self.model_run_config['run_name']))
             self.results.parse_model_output(self)
             return
-            # TODO: Update model results to reflect infeasibility.
 
+        # TODO: Move result extraction into it's own function (or tie to partial_coverage_model object)
         if self.logger:
             self.logger.info("Extracting results")
         ids = utilities.get_ids(mclp, "responder_layer")
@@ -94,17 +81,20 @@ class ModelCore:
             self.logger.info("Output query to use to generate response area maps is: {}".format(select_query))
             self.logger.info("Output query to use to generate response point maps is: {}".format(point_select_query))
         # Determine how much demand is covered by the results
-        self.response_areas.setSubsetString(select_query)
-        self.road_points.setSubsetString(point_select_query)
+        self.selected_points = RoadPointLayer().copy(RoadPointLayer(layer=self.road_points))
+        self.selected_points.layer.setSubsetString(point_select_query)
+        self.selected_areas = ResponderLayer().copy(ResponderLayer(layer=self.response_areas))
+        self.selected_areas.layer.setSubsetString(select_query)
         self.results.parse_model_output(self)
+        # TODO: Fix calculation of covered demand and add to output
         #total_coverage = pyqgis_analysis.get_covered_demand(block_layer, "demand", "partial",
         #                                                    response_area_layer)
         if self.logger:
             # self.logger.info(
             # "{0:.2f}% of demand is covered".format((100 * total_coverage) / binary_coverage_polygon["totalDemand"]))
             self.logger.info("{} responders".format(len(ids)))
-        _write_shp_file(self.response_areas, self.paths['model_result_shp_output'])
-        _write_shp_file(self.road_points, self.paths['selected_points_shp_output'])
+        _write_shp_file(self.selected_areas.layer, self.paths['model_result_shp_output'])
+        _write_shp_file(self.selected_points.layer, self.paths['selected_points_shp_output'])
         self._write_qgs_project()
 
         return self
@@ -122,48 +112,7 @@ class ModelCore:
         else:
             return False
 
-    def _make_roads_layer(self):
-
-        roads_layer = _load_shp_file(self.paths['roads'], "roads_layer")
-        target_roads_layer = model_utils.isolate_roads(roads_layer, self.area)
-        target_roads_layer.setCrs(self.area.crs())
-
-        return target_roads_layer
-
-    def _make_road_points_layer(self):
-
-        road_points_layer = model_utils.create_road_points_layer(self.area, self.roads)
-        road_points_layer.setCrs(self.roads.crs())
-
-        return road_points_layer
-
-    def _make_block_layer(self):
-        block_polygon_layer = _load_shp_file(self.paths['block_outlines'], "block_outlines")
-        target_blocks_layer = model_utils.isolate_blocks(block_polygon_layer, self.area)
-        target_blocks_layer.setCrs(self.area.crs())
-
-        return target_blocks_layer
-
-    def _make_area_layer(self):
-        # Load map to select modeling area from
-        area_boundaries = _load_shp_file(self.paths['area_boundaries'], "area_boundaries")
-        # Isolate the polygon for the area to be modeled
-        local_area_layer = model_utils.isolate_feature(area_boundaries,
-                                                       self.batch_config.config['area_select_key'],
-                                                       self.model_run_config['areas'])
-        local_area_layer.setCrs(area_boundaries.crs())
-        return local_area_layer
-
-    def _make_service_area_layer(self):
-        config = self.model_run_config
-        response_radius_km = model_utils.calc_response_radius_km(config['response_time'], config['responder_speed'], config['responder_buffer'])
-        response_area_layer = model_utils.make_service_area_layer(self.road_points, response_radius_km)
-        response_area_layer.setCrs(self.road_points.crs())
-
-        return response_area_layer
-
     def _create_run_dirs(self):
-
         run_path = self.batch_config.config['batch_root'] + "Model Runs/" + str(self.model_run_config['run_name']) + "/"
         if not os.path.isdir(run_path):
             os.mkdir(run_path)
@@ -178,6 +127,7 @@ class ModelCore:
         _write_shp_file(self.road_points, self.paths['road_points_shp_output'])
         _write_shp_file(self.response_areas, self.paths['responder_shp_output'])
 
+    # TODO: Create a class to handle batch and model paths
     def _generate_paths(self, batch_config, model_run_config):
         batch_config = batch_config.config
         paths = {}
@@ -201,6 +151,7 @@ class ModelCore:
         # Add the relevant metadata to self.results for the run
         pass
 
+    # TODO: Move this function to layers.py as QgsProjectWriter
     def _write_qgs_project(self):
         # TODO: This function probably doesn't need to reload the shp files
         project = QgsProject().instance()
@@ -221,117 +172,10 @@ class ModelCore:
 
     def load_layers(self, layer_handler):
 
-        for layer_name, layer in vars(layer_handler).items():
-            setattr(self, layer_name, layer)
+        for layer_name, layer in layer_handler.items():
+            setattr(self, layer_name, layer.layer)
 
-
-class LayerBuilder:
-
-    # Load and create layers for modeling
-    def __init__(self, batch_config):
-        self.config = batch_config
-        self.layers = {
-            "areas": {},
-            "blocks": {},
-            "roads": {},
-            "road_points": {},
-            "pre_coverage": {},
-            "response_areas": {}
-        }
-
-    def make_all(self):
-
-        self.make_area_layers()
-        self.make_block_layers()
-        self.make_road_layers()
-        self.make_road_point_layers()
-        self.make_response_area_layers()
-
-    def make_area_layers(self):
-        # Iterate the areas in batch_config
-        print(self.config)
-        print(self.config.config)
-        for area in self.config.config['settings']['areas']:
-            area_bounds = _load_shp_file(self.config.config['map_path'], 'area_boundaries')
-            area_layer = model_utils.isolate_feature(area_bounds, self.config.config['area_select_key'], area)
-            area_layer.setCrs(area_bounds.crs())
-            self.layers['areas'][area] = area_layer
-
-    def make_block_layers(self):
-
-        for area in self.config.config['settings']['areas']:
-            blocks = _load_shp_file(self.config.config['block_path'], "block_outlines")
-            target_blocks = model_utils.isolate_blocks(blocks, self.layers['areas'][area])
-            target_blocks.setCrs(self.layers['areas'][area].crs())
-            print("Blocks found: {}".format(len(list(target_blocks.getFeatures()))))
-            self.layers['blocks'][area] = target_blocks
-
-    def make_road_layers(self):
-
-        for area in self.config.config['settings']['areas']:
-            roads = _load_shp_file(self.config.config['road_path'], "roads_layer")
-            print("Original roads found: {}".format(len(list(roads.getFeatures()))))
-            print(len(list(self.layers['areas'][area].getFeatures())))
-            target_roads = model_utils.isolate_roads(roads, self.layers['areas'][area])
-            target_roads.setCrs(self.layers['areas'][area].crs())
-            print("Roads found: {}".format(len(list(target_roads.getFeatures()))))
-            self.layers['roads'][area] = target_roads
-
-    def make_road_point_layers(self):
-        print(self.layers)
-        for area in self.config.config['settings']['areas']:
-            road_points_layer = model_utils.create_road_points_layer(self.layers['areas'][area], self.layers['roads'][area])
-            road_points_layer.setCrs(self.layers['roads'][area].crs())
-            self.layers['road_points'][area] = road_points_layer
-
-    def make_response_area_layers(self):
-        config = self.config.config['settings']
-
-        for area in config['areas']:
-            service_area_combinations = list(itertools.product(*[config['response_time'], config['responder_speed'], config['responder_buffer']]))
-            print(service_area_combinations)
-            for response_time, responder_speed, responder_buffer in service_area_combinations:
-            
-                response_radius_km = model_utils.calc_response_radius_km(response_time, responder_speed,
-                                                                         responder_buffer)
-                response_area_layer = model_utils.make_service_area_layer(self.layers['road_points'][area], response_radius_km)
-                response_area_layer.setCrs(self.layers['road_points'][area].crs())
-                run_settings = {
-                    'areas': area,
-                    'response_time': response_time,
-                    'responder_speed': responder_speed,
-                    'responder_buffer': responder_buffer
-                }
-                self.layers['response_areas'][_get_service_area_layer_key(run_settings)] = response_area_layer
-
-    def get_run_layers(self, run_settings):
-        layers = LayerHandler()
-        layers.add("area", self.layers['areas'][run_settings['areas']])
-        layers.add("blocks", self.layers['blocks'][run_settings['areas']])
-        layers.add("roads", self.layers['roads'][run_settings['areas']])
-        layers.add("road_points", self.layers['road_points'][run_settings['areas']])
-        layers.add("response_areas", self.layers['response_areas'][_get_service_area_layer_key(run_settings)])
-
-        return layers
-
-
-def _get_service_area_layer_key(run_vals):
-    return "{}_{}_{}_{}".format(run_vals['areas'], run_vals['response_time'], run_vals['responder_speed'],
-                                run_vals['responder_buffer'])
-
-
-class LayerHandler:
-    def __init__(self):
-        self.area = None
-        self.blocks = None
-        self.roads = None
-        self.road_points = None
-        self.response_areas = None
-
-    def add(self, layer_type, layer):
-        setattr(self, layer_type, layer)
-
-
+# TODO: Remove these once they are no longer needed by _write_qgs_method etc
 def _load_shp_file(path, name="new_layer"):
     return QgsVectorLayer(path, name, "ogr")
 

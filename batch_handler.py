@@ -1,7 +1,8 @@
 import json
 import itertools
 import os
-from model_core import ModelCore, LayerBuilder
+from layers import *
+from model_core import ModelCore
 from model_utils import MetadataHandler, ConfigReader, GraphBuilder
 
 
@@ -19,14 +20,15 @@ class BatchHandler:
 
         # Prepare the layer files for the batch
         print(self.batch_config.config)
-        layers = LayerBuilder(self.batch_config)
+        layers = BatchLayerHandler(self.batch_config)
         layers.make_all()
         print("Full layer table:")
-        print(vars(layers.layers))
+        print(layers.layers)
 
         if self.logger is not None:
             self.logger.info("Running {} models from batch: {}".format(len(self.batch), self.batch_config.config['name']))
             self.logger.info("Generating output dirs at {}".format(self.batch_config.config['batch_root']))
+            # TODO: Update create dirs to throw error if dirs exist unless config flag overwrite=True
             self._create_dirs()
         for index, model_run_config in enumerate(self.batch):
             if self.logger is not None:
@@ -35,7 +37,8 @@ class BatchHandler:
             model_run = ModelCore(self.batch_config, model_run_config, logger=logger)
             print("Running model with the following settings and layers:")
             print(model_run_config)
-            print(layers.get_run_layers(model_run_config))
+            for layer in layers.get_run_layers(model_run_config).values():
+                print("{} --> {} features".format(layer.layer_type, len(list(layer.layer.getFeatures()))))
             model_run.load_layers(layers.get_run_layers(model_run_config))
             model_run.model()
             model_results = model_run.results.metadata['results']
@@ -46,6 +49,8 @@ class BatchHandler:
 
         #self._save_metadata()
         self._save_batch_csv()
+
+        # TODO: Move graphing to it's own module and add graph config to config
 
         graph_config = {
             'title': "Scatter Test",
@@ -59,7 +64,6 @@ class BatchHandler:
         }
 
         test_scatter = GraphBuilder(self, graph_config)
-        print(test_scatter)
         test_scatter.plot()
 
     def _save_metadata(self):
@@ -82,106 +86,3 @@ class BatchHandler:
     def _save_batch_files(self):
         # Save CSV of batch information
         pass
-
-'''
-class ShapefileRenderer:
-
-
-# Creates shapefiles for a model run (takes MetadataHandler)
-
-
-
-        # Instantiate a ConfigReader with the path to the configuration file
-        # Parse the json config file
-        # Paths for input and output files
-        # Batch definition
-        # {
-        max_runtime = 90,
-        modes = [
-            {
-                mode_name = "threshold"
-        test_values = [50, 75, 100]
-        },
-        {
-            mode_name = "max_coverage"
-        test_values = [20, 50, 100]
-        }
-        ],
-        areas = [Kerrisdale, Kilarney],
-        response_time = [3, 5, 7],
-        responders = [
-            {
-                type = "Community Responder",
-                       speed = 5,
-                               buffer_time = 120,
-                                             number = X
-        },
-        {
-            type = "Staff Responder",
-                   speed = 15,
-                           buffer_time = 90,
-                                         number = 5
-        }
-        ]
-        }
-        # Output the status of configuration
-        # Prepare data files for model
-        # Pass files to model engine
-        # Preload shp files for areas (instead of recreating them for each model run)
-        # Run each model based on the config
-        # Output the results of each model run to the specified path, as well as a summary csv/xlsx file with information on all runs in each mode
-        # Parent Dir
-        # Batch Dir
-        # Batch metadata file (contains all modelrun metadata plus batch config information)
-        # Batch Summaries by mode
-        # Model Run Dir
-        # Model run metadata
-        {
-        status = "success", ("timeout")
-        date = "2019-Nov-27",
-        time = "12:00:00",
-        runtime = 1200,
-        user = "admin",
-        config = {
-            blah
-        blah
-        }
-        responder_locs = [{
-            area_id = 1,
-                      loc = (x, y)
-        }, ...]
-        results = {
-            coverage = 100,
-                       num_responders = 53,
-                                        responder_data = [
-            {
-                type = "Community Responder",
-                       speed = 5,
-                               number = 50
-        },
-        {
-            type = "Staff Responder",
-                   speed = 15,
-                           number = 3
-        }
-        ]
-        selected_areas = {
-            {
-                loc = (x, y),
-                      responder_radius = 300,
-                                         area_id = 1,
-                                                   responder = {
-            {
-                type = "Community Responder",
-                       speed = 5
-        }
-        }
-        }
-        }
-        }
-        }
-        # SHP files
-
-        # Make the results browsable and reviewable using an online GIS viewer 
-        
-'''

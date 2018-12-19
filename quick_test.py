@@ -1,14 +1,28 @@
-import model_utils
-import os
-import sys
-from model_utils import ConfigReader
-from batch_handler import BatchHandler
+from layers import BatchLayerHandler
+from model_utils import ConfigReader, init_logger
+import os, sys
+
+
+def test_area_layer_load(source_path):
+
+    config = ConfigReader()
+    config.config = {
+        'map_path': source_path,
+        'area_select_key': 'MAPID',
+        'settings': {
+            'areas': ['KERR']
+        }
+    }
+
+    layer_handler = BatchLayerHandler(config).make_area_layers()
+    assert len(list(layer_handler.layers['areas']['KERR'].layer.getFeatures())) == 1
+
 
 if __name__ == "__main__":
 
-    logger = model_utils.init_logger()
+    logger = init_logger()
 
-    logger.info("Starting QGIS...")
+    print("Attempting to run...")
     os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = '/Applications/QGIS3.app/Contents/PlugIns'
     # os.environ['QGIS_PREFIX_PATH'] = '/Applications/QGIS3.app/Contents'
     sys.path.insert(0, '/Applications/QGIS3.app/Contents/Resources/python/')
@@ -24,11 +38,5 @@ if __name__ == "__main__":
     QgsApplication.setThemeName('Night Mapping')
     app.initQgis()
 
-    # Load config file passed as sys arg
-    config_rdr = ConfigReader()
-    config_rdr.load(sys.argv[1])
 
-    # TODO: Add support for meta-batch handling and results parsing
-
-    batch = BatchHandler(config_rdr, config_rdr.generate_batch(), logger)
-    batch.run(logger=logger)
+test_area_layer_load("shp_files/local_area_boundary.shp")
