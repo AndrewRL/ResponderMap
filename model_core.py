@@ -9,11 +9,13 @@ from layers import *
 
 
 class ModelCore:
-
-    def __init__(self, batch_config, model_run_config, logger=None):
+    # TODO: ModelCore shouldn't need batch_config in addition to run_config. Model config could include paths.
+    def __init__(self, batch_config, model_run_config, paths, logger=None):
+        # TODO: ModelCore should use layers object rather than importing layers to it's own variables
         self.batch_config = batch_config
         self.model_run_config = model_run_config
-        self.paths = self._generate_paths(self.batch_config, self.model_run_config)
+        self.paths = paths
+        # TODO: Get data from pulp model object to populate these fields
         self.problem = None
         self.vars = None
         self.status = None
@@ -36,8 +38,6 @@ class ModelCore:
         # Run a threshold model on a provided demand and response_area layer
 
         self._create_run_dirs()
-        # TODO: shp_files should be saved from layer objects (or some kind of layer writer?)
-        self._save_shp_files()
 
         # TODO: Figure out why it is necessary to reload here rather than just using the layer.
         block_layer = QgsVectorLayer(self.paths['block_shp_output'], "block_layer", "ogr")
@@ -81,9 +81,9 @@ class ModelCore:
             self.logger.info("Output query to use to generate response area maps is: {}".format(select_query))
             self.logger.info("Output query to use to generate response point maps is: {}".format(point_select_query))
         # Determine how much demand is covered by the results
-        self.selected_points = RoadPointLayer().copy(RoadPointLayer(layer=self.road_points))
+        self.selected_points = SelectedPointsLayer().copy(RoadPointLayer(layer=self.road_points))
         self.selected_points.layer.setSubsetString(point_select_query)
-        self.selected_areas = ResponderLayer().copy(ResponderLayer(layer=self.response_areas))
+        self.selected_areas = SelectedAreasLayer().copy(ResponderLayer(layer=self.response_areas))
         self.selected_areas.layer.setSubsetString(select_query)
         self.results.parse_model_output(self)
         # TODO: Fix calculation of covered demand and add to output
@@ -174,6 +174,49 @@ class ModelCore:
 
         for layer_name, layer in layer_handler.items():
             setattr(self, layer_name, layer.layer)
+
+
+class ModelEngine:
+    # Parent class for all the different model types (threshold, partial / binary coverage)
+    pass
+
+
+class Preprocessor:
+    # Parent class for model layer preprocessors (preexisting coverage)
+    pass
+
+
+class CoveragePreprocessor:
+    # Adapts batchhandler to produce pre-existing.
+    def __init__(self, batch_handler):
+        self.batch_handler = batch_handler
+        self.layers = batch_handler.layers
+        self.config = batch_handler.batch_config
+
+    def run(self):
+        # Load existing coverage
+        self.layers.layers['existing'] = CoverageLayer().load("coverage_layer",
+                                                              self.config.config['existing_coverage_path'])
+
+        self.layers.clone_layers("blocks", "original_block", "original_block_layer")
+        print(self.layers)
+        # Create coverage layers
+        self.create_coverage_layers()
+
+        # Save coverage layers
+        LayerWriter(self.batch_handler, self.layers).write_all()
+        # Reoutput original block layer?
+        return self.layers
+
+    def create_coverage_layers(self):
+        layers = self.layers.layers
+        for tag, layer in layers['blocks'].items():
+            # Get intersection between block layer and existing coverage layer
+            print("Clipping layer: {}".format(tag))
+            print("Area before clip: {}".format(sum([feature.geometry().area() for feature in layer.layer.getFeatures()])))
+            layer.clip(layers['existing'])
+            print("Area after clip: {}".format(sum([feature.geometry().area() for feature in layer.layer.getFeatures()])))
+
 
 # TODO: Remove these once they are no longer needed by _write_qgs_method etc
 def _load_shp_file(path, name="new_layer"):

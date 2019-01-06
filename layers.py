@@ -101,14 +101,12 @@ class BatchLayerHandler:
             self.layers['response_areas'][model_utils._get_service_area_layer_key(model_run_config)]
 
         return layers
-'''
-    def save_layers_to_shp(self, model_run_config):
-        
-        output_paths = model_utils.get_output_paths(self.layers, self.config, model_run_config)
-        
-        for layer_type, layer in self.layers.items():
-            layer.layer.write(output_paths[layer_type])
-'''
+
+    def clone_layers(self, entry_key, new_entry_key, layer_type):
+        self.layers[new_entry_key] = {}
+        for tag, layer in self.layers[entry_key].items():
+            self.layers[new_entry_key][tag] = Layer(layer_type).copy(layer)
+
 
 class LayerBuilder:
     def __init__(self, logger=None):
@@ -273,6 +271,41 @@ class Layer:
         self.layer.commitChanges()
         return self
 
+    def clip(self, polygon_layer):
+        dissolved_geom = QgsGeometry()
+        print("Combining {} coverage areas.".format(len(list(polygon_layer.layer.getFeatures()))))
+        for n_feat, cliper in enumerate(polygon_layer.layer.getFeatures()):
+            '''
+            print("Adding area to coverage ({} area)".format(feature.geometry().area()))
+            dissolved_geom = dissolved_geom.combine(feature.geometry())
+            '''
+            print("Combined coverage features. Total covered area: {}".format(dissolved_geom.area()))
+
+
+            for clipee in self.layer.getFeatures():
+                if cliper.geometry().intersects(clipee.geometry()):
+                    print("Found intersection. Clipping feature...")
+                    intersected = cliper.geometry().intersection(clipee.geometry())
+                    print("Clipping {} of {} area.".format(intersected.area(), clipee.geometry().area()))
+                    diff = clipee.geometry().difference(intersected)
+                    self.layer.startEditing()
+                    if diff.area() <= 0:
+                        self.layer.deleteFeature(clipee.id())
+                        continue
+                    self.layer.dataProvider().changeGeometryValues({
+                        clipee.id(): diff
+                    })
+                    self.layer.commitChanges()
+                    '''
+                    demand_field_index = clipee.fields().indexFromName('demand')
+
+                    print(clipee['demand'])
+                    self.layer.changeAttributeValue(clipee.id(), demand_field_index, math.sqrt(clipee.geometry().area()))
+                    print(clipee['demand'])
+                    '''
+                    print("Remaining area: {}".format(clipee.geometry().area()))
+
+
 
 class AreaSourceLayer(Layer):
     def __init__(self, layer=None):
@@ -321,11 +354,17 @@ class RoadPointLayer(Layer):
     def __init__(self, layer=None):
         super().__init__("road_point_layer", layer)
 
+class SelectedPointsLayer(Layer):
+    def __init__(self, layer=None):
+        super().__init__("selected_points_layer", layer)
 
 class ResponderLayer(Layer):
     def __init__(self, layer=None):
         super().__init__("responder_layer", layer)
 
+class SelectedAreasLayer(Layer):
+    def __init__(self, layer=None):
+        super().__init__("selected_areas_layer", layer)
 
 class CoverageLayer(Layer):
     def __init__(self, layer=None):
@@ -336,3 +375,41 @@ def save_layers_as_shp(layers):
     for path, layer in layers:
         layer.layer.write(path)
 
+
+class LayerWriter:
+
+    def __init__(self, batch_handler, layer_handler):
+        self.batch_handler = batch_handler
+        self.layers = layer_handler
+        self.paths = self.batch_handler.paths
+        self.index = {
+            "area_layer": "area_shp_output",
+            "grid_layer": "grid_shp_output",
+            "road_layer": "road_shp_output",
+            "road_point_layer": "road_points_shp_output",
+            "block_layer": "block_shp_output",
+            "responder_layer": "responder_shp_output",
+            "selected_areas_layer": "model_result_shp_output",
+            "selected_points_layer": "selected_points_shp_output",
+        }
+
+    # TODO: Create a cohesive naming convention for layers
+    def write_all(self):
+        # Write all layers in self.layers
+        for run, run_config in enumerate(self.batch_handler.batch):
+            for layer in self.layers.get_run_layers(run_config).values():
+                layer.write(self.paths.paths['runs'][str(run)][self.index[layer.layer_type]])
+
+    def _match_layer_to_path(self, layer):
+        return self.index[layer.layer_type]
+
+    def _match_path_to_layer(self, path):
+        index = _invert_index_k_v(self.index)
+        return
+
+
+def _invert_index_k_v(index):
+    inverted_index = {}
+    for key in index.keys():
+        inverted_index[index[key]] = key
+    return inverted_index

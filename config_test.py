@@ -5,8 +5,8 @@ import json
 def generate_config():
     # Create config dict
     config = {
-        "preload_coverage": True,
-        "existing_coverage": None,
+        "existing_coverage": True,
+        "existing_coverage_path": "Results/TestBatch2/Model Runs/1/selected_areas.shp",
         "name": "Kerr_Pres_Run",
         "max_runtime": 90,
         "mode": "threshold",
