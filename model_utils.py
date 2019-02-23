@@ -11,6 +11,8 @@ from plotly.offline import iplot, init_notebook_mode
 import plotly.graph_objs as go
 import plotly.io as pio
 import random
+import copy
+import os
 
 
 class GraphBuilder:
@@ -199,7 +201,79 @@ class ConfigReader:
         pass
 
 
-def calc_response_radius_km(response_time, responder_speed, buffer_time):
+def merge_models_by_area(batch, models):
+    models_to_merge = {}
+    for model in models:
+        config_to_merge = model.model_run_config
+        config_key = copy.deepcopy(config_to_merge)
+        del(config_key['areas'])
+        del(config_key['run_name'])
+        config_key = tuple(sorted(config_key.items()))
+        if config_key not in models_to_merge.keys():
+            print(f"Creating new merged model with key: {config_key}")
+            models_to_merge[config_key] = []
+
+        run_layers = batch.layers.get_run_layers(config_to_merge)
+        run_layers['selected_points'] = model.selected_points
+        run_layers['selected_areas'] = model.selected_areas
+
+        models_to_merge[config_key].append(run_layers)
+
+    for settings, runs in models_to_merge.items():
+        settings_str = "_".join([str(setting[1]) for setting in settings])
+        output_path = f"{batch.batch_config.config['batch_root']}" + f"{settings_str}/"
+        if not os.path.exists(output_path):
+            os.mkdir(output_path)
+        merged_layers = {}
+        for key in runs[0].keys():
+            merge_layers = [run_layers[key] for run_layers in runs]
+            merged_layers[key] = combine_layers(batch, merge_layers)
+            print(f"Merged layers. Resulting layer has {len(list(merged_layers[key].getFeatures()))} features.")
+
+        print(merged_layers)
+        for layer in merged_layers.values():
+            QgsVectorFileWriter.writeAsVectorFormat(layer, output_path + layer.name() + ".shp", "System", layer.crs(),
+                                                    "ESRI Shapefile")
+        # Save layers with QgsLayerWriter
+
+        project = QgsProject().instance()
+        config = batch.batch_config.config
+        project_path = config['batch_root'] + config['name'] + settings_str + '.qgs'
+
+        # TODO: This step shouldn't be necessary
+        # load layers from file
+        print(os.listdir(output_path))
+        layer_paths = [path for path in os.listdir(output_path) if ".shp" in path]
+        print(layer_paths)
+        merged_layers = [QgsVectorLayer(output_path + path, path[:-4], 'ogr') for path in layer_paths]
+        print(merged_layers)
+        # add files to the project and register them
+        for layer in merged_layers:
+            project.addMapLayer(layer)
+
+        # write the project file
+        project.write(project_path)
+        project.clear()
+        # Save layers to project
+
+
+def combine_layers(batch, layers):
+
+    # TODO: Check layer type and throw error if layers are not of same type
+    type_geom = QgsWkbTypes.displayString(int(QgsWkbTypes.flatType(int(layers[0].layer.wkbType()))))
+    crs_id = layers[0].layer.crs().authid()
+
+    output_layer = QgsVectorLayer(type_geom + "?crs=" + crs_id,
+                                    layers[0].layer_type,
+                                    "memory")
+    output_prov = output_layer.dataProvider()
+    for layer in layers:
+        for ft in layer.layer.getFeatures():
+            output_prov.addFeatures([ft])
+    return output_layer
+
+
+def calc_response_radius_m(response_time, responder_speed, buffer_time):
     return (response_time - buffer_time) * responder_speed * 1000 / 60 / 60
 
 
@@ -269,7 +343,8 @@ def make_points(county_bounds, x_step, y_step):
 
 # TODO: Move this into layers
 def create_road_points_layer(area_layer, roads_layer, rp_model='n_darts'):
-    road_points_layer = QgsVectorLayer("Point", "road_points", "memory")
+    crs_id =  area_layer.crs().authid()
+    road_points_layer = QgsVectorLayer("Point" + "?crs=" + crs_id, "road_points", "memory")
     rp_prov = road_points_layer.dataProvider()
     road_points_layer.startEditing()
     rp_prov.addAttributes([QgsField("point_id", QVariant.Int)])
@@ -286,14 +361,18 @@ def create_road_points_layer(area_layer, roads_layer, rp_model='n_darts'):
     return road_points_layer
 
 # TODO: Create a road_points_model class and
-def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts_prov, n_darts=120, buffer=150):
+def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts_prov, n_darts=120, buffer=200, throw_cap=1000):
     roads = list(roads_layer.getFeatures())
     print("Found {} roads for point placement.".format(len(roads)))
     for dart in range(0, n_darts):
+        remaining_throws = throw_cap
         # Throw the dart until you hit a viable location
         dart_placed = False
         print("Throwing dart {} of {}".format(dart, n_darts))
         while not dart_placed:
+            if remaining_throws == 0:
+                break
+
             # Randomly select a road segment (possibly weighted by length)
             total_rd_length = sum([road.geometry().length() for road in roads])
             road_seg = random.choices(roads, weights=[road.geometry().length() / total_rd_length for road in roads])[0]
@@ -320,6 +399,7 @@ def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts
                 for existing_point in road_points_layer.getFeatures():
                     if existing_point.geometry().intersects(test_point_buffer):
                         near_existing_point = True
+                        remaining_throws -= 1
                         break
 
                 if not near_existing_point:
@@ -328,6 +408,10 @@ def _n_darts_road_pts_model(area_layer, roads_layer, road_points_layer, road_pts
                     ft.setAttributes([dart])
                     road_pts_prov.addFeatures([ft])
                     dart_placed = True
+
+        if remaining_throws == 0:
+            break
+
 
     print("Saving candidate locations to road_points_layer. Created {} points (n_darts = {}).".format(len(list(road_points_layer.getFeatures())), n_darts))
 

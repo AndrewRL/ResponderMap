@@ -284,9 +284,13 @@ def generate_partial_coverage(dl, fl, dl_demand_field, dl_id_field, fl_id_field,
                     dissolved_geom = feature.geometry()
                 dissolved_geom = dissolved_geom.combine(feature.geometry())
                 intersected = dissolved_geom.intersection(feature.geometry())
-        if intersected.area() > 0:
-            serviceable_demand = (float(intersected.area() / feature.geometry().area()) * feature[dl_demand_field])
-        else:
+        try:
+            if intersected.area() > 0:
+                serviceable_demand = (float(intersected.area() / feature.geometry().area()) * feature[dl_demand_field])
+            else:
+                serviceable_demand = 0.0
+        except Exception as e:
+            print(e)
             serviceable_demand = 0.0
         # Make sure serviceable is less than or equal to demand, floating point issues
         if serviceable_demand < output["demand"][str(feature[dl_id_field])]["demand"]:

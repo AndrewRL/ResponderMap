@@ -30,6 +30,10 @@ class BatchHandler:
         print("Full layer table:")
         print(self.layers.layers)
 
+        # Set up area combination if needed
+        if self.batch_config.config['combine_areas']:
+            models = []
+
         if self.logger is not None:
             self.logger.info("Running {} models from batch: {}".format(len(self.batch), self.batch_config.config['name']))
             self.logger.info("Generating output dirs at {}".format(self.batch_config.config['batch_root']))
@@ -53,6 +57,13 @@ class BatchHandler:
                 self.logger.info("Run complete. Status: {} | Coverage: FIX ME | Num. Responders: {}".format(model_results[0]['status'],
                                                                                            model_results[0]['n_responders']))
             self.metadata.metadata['results'].append(model_run.results.metadata)
+
+            # Save results for combination if combine_areas flag is True
+            if self.batch_config.config['combine_areas'] and model_run.status != 'Infeasible':
+                models.append(model_run)
+
+        if self.batch_config.config['combine_areas']:
+            model_utils.merge_models_by_area(self, models)
 
         #self._save_metadata()
         self._save_batch_csv()

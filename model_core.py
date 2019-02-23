@@ -64,6 +64,7 @@ class ModelCore:
         if pulp.LpStatus[mclp.status] == "Infeasible":
             print(pulp.LpStatus[mclp.status])
             print("Model run {} deemed infeasible. Skipping...".format(self.model_run_config['run_name']))
+            self.status = pulp.LpStatus[mclp.status]
             self.results.parse_model_output(self)
             return
 

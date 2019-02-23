@@ -1,0 +1,25 @@
+TODO:
+
+- Make it possible to flag all areas to "ON" by editing model run config creation
+- Fix how area key is passed into isolate_by_proportion on layer creation
+
+- Develop caching for shp_files and generated data (demand values, coverage)
+- Automate output styling (with configurable tags for different style groups eg style='Brave_Original')
+
+- DL OSM data for Columbus and align it
+- Create a routable network from OSM data
+- Use resources to create isochrones based on the routable network for each point instead of buffers
+
+- Use rudimentary elimination of the responders who cover the least area to reduce responders until threshold is hit when combining areas
+
+- Add census block data to blocks file for race, age, income
+
+TODO: (Popmodels)
+- Confirm that you are using the census block IDs in a proper / unique way
+- Add location information to each person (random point within their assigned block)
+- Use naive bayes to generate a likelihood that a person will overdose based on ER visits / ambulance calls
+- Add a function to population / subpopulation to make a shp file from members
+- Collapse block data to the block level
+- Fix person.to_list to return a flat list
+- Create a set of submodels for all blocks and store them in a population
+- Make attribute generators take a baseline or fill function to be used when a distribution can't be generated

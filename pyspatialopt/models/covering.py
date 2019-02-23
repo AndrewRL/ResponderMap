@@ -440,7 +440,10 @@ def create_cc_threshold_model(coverage_dict, psi, model_file=None, delineator="$
     to_sum = []
     for demand_id in coverage_dict["demand"]:
         # divide the demand by total demand to get percentage
-        scaled_demand = float(100 / sum_demand)
+        if sum_demand > 0:
+            scaled_demand = float(100 / sum_demand)
+        else:
+            scaled_demand = 0.0
         to_sum.append(scaled_demand * demand_vars[demand_id])
     prob += pulp.lpSum(to_sum) >= psi, "Threshold"
     if model_file:

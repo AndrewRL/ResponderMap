@@ -13,7 +13,6 @@ class BatchLayerHandler:
         self.layers = {}
 
     def make_all(self):
-
         self.make_area_layers()
         self.make_block_layers()
         self.make_road_layers()
@@ -36,6 +35,7 @@ class BatchLayerHandler:
         self.layers['blocks'] = {}
         for area in config['settings']['areas']:
             make_config = {
+                "area_source_path": config['map_path'],
                 "block_source_path": config['block_path'],
                 "area_layer": self.layers['areas'][area].layer
             }
@@ -130,7 +130,12 @@ class LayerBuilder:
             self.logger.info("Creating area_layer from source: {}".format(make_config['area_source_path']))
         area_map = AreaSourceLayer().load("area_source_layer", make_config['area_source_path'])
         area_bounds = AreaLayer().copy(area_map)
+        print(f"Loaded area layer with areas: {area_bounds.get_attribute_values('SNA_NAME')}")
+        if self.logger:
+            self.logger.info(f"Loaded area layer with areas: {area_bounds.get_attribute_values('SNA_NAME')}")
+
         area_bounds.isolate_features([make_config['area_select_key']], [[make_config['area']]])
+
         return area_bounds
 
     def _make_block_layer(self, make_config):
@@ -139,7 +144,8 @@ class LayerBuilder:
 
         block_map = BlockSourceLayer().load("block_source_layer", make_config['block_source_path'])
         blocks = BlockLayer().copy(block_map)
-        blocks.isolate_intersecting_and_contained(make_config['area_layer'])
+        area_map = AreaSourceLayer().load("area_source_layer", make_config['area_source_path'])
+        blocks.isolate_intersecting_by_proportion(area_map, make_config['area_layer'])
         blocks.set_attributes()
         return blocks
 
@@ -177,7 +183,7 @@ class LayerBuilder:
         current_id = 0
         for point in make_config['road_points_layer'].getFeatures():
             ft = QgsFeature()
-            radius = model_utils.calc_response_radius_km(make_config['response_time'],
+            radius = model_utils.calc_response_radius_m(make_config['response_time'],
                                                          make_config['responder_speed'],
                                                          make_config['responder_buffer'])
             ft.setGeometry(QgsGeometry.fromPointXY(point.geometry().asPoint()).buffer(radius, 10))
@@ -200,6 +206,7 @@ class Layer:
 
     def load(self, layer_type, path):
         self.layer = QgsVectorLayer(path, layer_type, "ogr")
+        print(f"Loaded layer with projection: {self.layer.crs().authid()}")
         return self
 
     def write(self, path):
@@ -207,9 +214,11 @@ class Layer:
                                                 "ESRI Shapefile")
 
     def copy(self, source_layer):
+        layer_type = source_layer.layer_type
         source_layer = source_layer.layer
         type_geom = QgsWkbTypes.displayString(int(QgsWkbTypes.flatType(int(source_layer.wkbType()))))
         crs_id = source_layer.crs().authid()
+        print(f"Copying {layer_type} with id: {crs_id}")
         out_layer = QgsVectorLayer(type_geom + "?crs=" + crs_id,
                                     self.layer_type,
                                    "memory")
@@ -224,9 +233,17 @@ class Layer:
         self.layer = out_layer
         return self
 
-    def make(self, layer_type, shape):
+    def make(self, layer_type, geometry_type):
         # Create a scratch layer with feature shape "shape"
-        pass
+        self.layer_type = layer_type
+        self.layer = QgsVectorLayer(geometry_type, layer_type, "memory")
+        return self
+
+    def get_attribute_values(self, attribute):
+        attr_values = []
+        for ft in self.layer.getFeatures():
+            attr_values.append(ft[attribute])
+        return attr_values
 
     def isolate_features(self, keys, values):
         filter_expression = ""
@@ -265,9 +282,71 @@ class Layer:
     def isolate_intersecting_and_contained(self, area_layer):
         polygon = next(area_layer.getFeatures())
         self.layer.startEditing()
-        for road in self.layer.getFeatures():
-            if not polygon.geometry().intersects(road.geometry()) or not polygon.geometry().contains(road.geometry()):
-                self.layer.deleteFeature(road.id())
+        for ft in self.layer.getFeatures():
+            if not polygon.geometry().intersects(ft.geometry()) or not polygon.geometry().contains(ft.geometry()):
+                self.layer.deleteFeature(ft.id())
+        self.layer.commitChanges()
+        return self
+
+    def isolate_intersecting_by_proportion(self, areas_layer, area_layer, area_key="SNA_NAME"):
+        polygon = next(area_layer.getFeatures())
+        # Create bounding box from all areas
+        feat = QgsFeature()
+        areas = areas_layer.layer.getFeatures()
+        areas.nextFeature(feat)
+        bounding_box = feat.geometry().boundingBox()
+        while areas.nextFeature(feat):
+            bounding_box.combineExtentWith(feat.geometry().boundingBox())
+        print(f"Filtering {len(list(self.layer.getFeatures()))} features")
+        filtered_features = list(self.layer.getFeatures(QgsFeatureRequest().setFilterRect(bounding_box)))
+        print(f"Checking {len(filtered_features)} filtered features for area membership.")
+        self.layer.startEditing()
+
+        type_geom = QgsWkbTypes.displayString(int(QgsWkbTypes.flatType(int(self.layer.wkbType()))))
+        crs_id = area_layer.crs().authid()
+        filtered = QgsVectorLayer(type_geom + "?crs=" + crs_id,
+                                    self.layer_type,
+                                    "memory")
+
+        output_prov = filtered.dataProvider()
+        attr = self.layer.fields().toList()
+        print(f"Copying fields: {attr}")
+        output_prov.addAttributes(attr)
+        filtered.updateFields()
+        print(output_prov.fields().toList())
+
+        self.layer = filtered
+
+        for ft in filtered_features:
+            output_prov.addFeatures([ft])
+        self.layer.commitChanges()
+
+        self.layer.startEditing()
+        for ft in self.layer.getFeatures():
+            cands = list(areas_layer.layer.getFeatures(QgsFeatureRequest().setFilterRect(ft.geometry().boundingBox())))
+
+            if len(cands) > 0:
+                max_intersection = cands[0]
+            else:
+                self.layer.deleteFeature(ft.id())
+                continue
+
+            found_intersection = False
+            for area in cands:
+                if ft.geometry().intersects(area.geometry()):
+                    found_intersection = True
+                    # Calc area of intersection
+                    intersection_area = ft.geometry().intersection(area.geometry()).area()
+                    if intersection_area > ft.geometry().intersection(max_intersection.geometry()).area():
+                        max_intersection = area
+
+            if not found_intersection:
+                self.layer.deleteFeature(ft.id())
+
+            if not max_intersection[area_key] == polygon[area_key]:
+                self.layer.deleteFeature(ft.id())
+
+        print(f"Layer has {len(list(self.layer.getFeatures()))} features after isolate_intersecting_by_proportion.")
         self.layer.commitChanges()
         return self
 
@@ -280,7 +359,6 @@ class Layer:
             dissolved_geom = dissolved_geom.combine(feature.geometry())
             '''
             print("Combined coverage features. Total covered area: {}".format(dissolved_geom.area()))
-
 
             for clipee in self.layer.getFeatures():
                 if cliper.geometry().intersects(clipee.geometry()):
@@ -304,7 +382,6 @@ class Layer:
                     print(clipee['demand'])
                     '''
                     print("Remaining area: {}".format(clipee.geometry().area()))
-
 
 
 class AreaSourceLayer(Layer):
@@ -342,8 +419,10 @@ class BlockLayer(Layer):
         self.layer.startEditing()
         for index, ft in enumerate(self.layer.getFeatures()):
             self.layer.changeAttributeValue(ft.id(), provider.fieldNameIndex("point_id"), index)
-            self.layer.changeAttributeValue(ft.id(), provider.fieldNameIndex("demand"), math.sqrt(ft.geometry().area()))
+
+            self.layer.changeAttributeValue(ft.id(), provider.fieldNameIndex("demand"), ft['POP10'] / ft.geometry().area() * 10**10, index)
         self.layer.commitChanges()
+
 
 class RoadLayer(Layer):
     def __init__(self, layer=None):
